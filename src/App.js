@@ -31,9 +31,18 @@ function App() {
   const [availableVoices, setAvailableVoices] = useState(configuredVoices);
   const [voice, setVoice] = useState(configuredVoices[0] || '');
   const [job, setJob] = useState(null);
+  const [outputAudioUrl, setOutputAudioUrl] = useState('');
+  const [isOutputAudioLoading, setIsOutputAudioLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
-  const [apiBaseTouched, setApiBaseTouched] = useState(Boolean(initialApiBaseUrl));
+  const [apiBaseTouched] = useState(Boolean(initialApiBaseUrl));
+  const selectedFileAudioUrl = useMemo(() => {
+    if (!selectedFile) {
+      return '';
+    }
+
+    return URL.createObjectURL(selectedFile);
+  }, [selectedFile]);
 
   const buildApiUrl = useCallback(
     (path) => {
@@ -91,13 +100,29 @@ function App() {
 
   const jobId = job?.id;
   const isTerminalState = job?.status === 'completed' || job?.status === 'failed';
-  const downloadUrl = useMemo(() => {
+  const apiOutputAudioUrl = useMemo(() => {
     if (!jobId) {
       return '';
     }
 
     return buildApiUrl(`/v1/speech-jobs/${jobId}/output-audio`);
   }, [buildApiUrl, jobId]);
+
+  useEffect(() => {
+    return () => {
+      if (outputAudioUrl) {
+        URL.revokeObjectURL(outputAudioUrl);
+      }
+    };
+  }, [outputAudioUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (selectedFileAudioUrl) {
+        URL.revokeObjectURL(selectedFileAudioUrl);
+      }
+    };
+  }, [selectedFileAudioUrl]);
 
   useEffect(() => {
     if (!jobId || isTerminalState) {
@@ -127,6 +152,49 @@ function App() {
     return () => clearInterval(timerId);
   }, [buildApiUrl, isTerminalState, jobId]);
 
+  useEffect(() => {
+    if (job?.status !== 'completed' || !jobId || outputAudioUrl) {
+      return undefined;
+    }
+
+    let isActive = true;
+    setIsOutputAudioLoading(true);
+
+    const loadOutputAudio = async () => {
+      try {
+        const response = await fetch(apiOutputAudioUrl);
+
+        if (!response.ok) {
+          throw new Error('Failed to download output audio.');
+        }
+
+        const audioBlob = await response.blob();
+        const nextUrl = URL.createObjectURL(audioBlob);
+
+        if (!isActive) {
+          URL.revokeObjectURL(nextUrl);
+          return;
+        }
+
+        setOutputAudioUrl(nextUrl);
+      } catch (error) {
+        if (isActive) {
+          setErrorMessage(error.message || 'Unable to retrieve output audio.');
+        }
+      } finally {
+        if (isActive) {
+          setIsOutputAudioLoading(false);
+        }
+      }
+    };
+
+    loadOutputAudio();
+
+    return () => {
+      isActive = false;
+    };
+  }, [apiOutputAudioUrl, job?.status, jobId, outputAudioUrl]);
+
   const handleSubmit = async (event) => {
     event.preventDefault();
     setErrorMessage('');
@@ -144,6 +212,14 @@ function App() {
     setIsSubmitting(true);
 
     try {
+      if (outputAudioUrl) {
+        URL.revokeObjectURL(outputAudioUrl);
+      }
+
+      setOutputAudioUrl('');
+      setIsOutputAudioLoading(false);
+      setJob(null);
+
       const response = await fetch(
         buildApiUrl('/v1/speech-jobs'),
         {
@@ -178,23 +254,11 @@ function App() {
           <p className="eyebrow">Speech Demo</p>
           <h1>Speech-to-Text-to-Speech Playground</h1>
           <p className="subtext">
-            Upload an audio file, pick a voice, and send it to your backend for processing.
+            Upload an audio file, track stage status, and retrieve generated output audio.
           </p>
         </div>
 
         <form className="speech-form" onSubmit={handleSubmit}>
-          <label htmlFor="api-url">Backend URL (from .env or server, optional override)</label>
-          <input
-            id="api-url"
-            type="text"
-            value={apiBaseUrl}
-            onChange={(event) => {
-              setApiBaseTouched(true);
-              setApiBaseUrl(event.target.value);
-            }}
-            placeholder="Example: https://api.example.com"
-          />
-
           <label htmlFor="audio-file">Audio file</label>
           <input
             id="audio-file"
@@ -203,6 +267,14 @@ function App() {
             onChange={(event) => setSelectedFile(event.target.files?.[0] || null)}
             required
           />
+
+          {selectedFileAudioUrl ? (
+            <div className="transcript">
+              <h3>Input Audio Preview</h3>
+              <p>{selectedFile?.name || 'Selected file'}</p>
+              <audio controls src={selectedFileAudioUrl} preload="metadata" />
+            </div>
+          ) : null}
 
           <label htmlFor="voice">Voice</label>
           <select
@@ -264,9 +336,23 @@ function App() {
             ) : null}
 
             {job.status === 'completed' ? (
-              <a href={downloadUrl} className="download-link">
-                Download output audio
-              </a>
+              <>
+                {isOutputAudioLoading ? (
+                  <p className="muted">Retrieving output audio...</p>
+                ) : null}
+                {outputAudioUrl ? (
+                  <>
+                    <audio controls src={outputAudioUrl} preload="metadata" />
+                    <a href={outputAudioUrl} className="download-link" download={`speech-job-${job.id}.wav`}>
+                      Download output audio
+                    </a>
+                  </>
+                ) : (
+                  <a href={apiOutputAudioUrl} className="download-link">
+                    Download output audio
+                  </a>
+                )}
+              </>
             ) : (
               <p className="muted">Polling for updates every 2 seconds...</p>
             )}
